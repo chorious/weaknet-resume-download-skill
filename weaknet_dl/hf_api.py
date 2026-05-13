@@ -1,13 +1,22 @@
+"""HuggingFace metadata + URL resolution.
+
+This module's I/O **always goes through the configured proxy** — both listing
+files and following the `/resolve/` redirect to obtain the CAS bridge URL.
+The CAS bridge URL itself is then downloaded **directly** (no proxy) by the
+aria2 daemon; see `engine.py`.
+"""
 from __future__ import annotations
 
 import re
 import urllib.parse
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Optional
 
 import httpx
 
+from .cas_url import domain_of, parse_expiry
 from .config import LARGE_EXTS
 
 
@@ -19,6 +28,13 @@ class HFFile:
     is_lfs: bool
 
 
+@dataclass
+class Resolved:
+    url: str
+    expires_at: datetime
+    domain: str
+
+
 def _client(proxy: Optional[str], token: Optional[str]) -> httpx.Client:
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     kwargs = {"timeout": 60.0, "headers": headers, "follow_redirects": True}
@@ -28,7 +44,6 @@ def _client(proxy: Optional[str], token: Optional[str]) -> httpx.Client:
 
 
 def _walk_tree(client: httpx.Client, repo_id: str, revision: str, subpath: str = "") -> Iterator[dict]:
-    """Walk HF /api/models/{repo}/tree/{revision} recursively (one level per call)."""
     url = f"https://huggingface.co/api/models/{repo_id}/tree/{revision}"
     if subpath:
         url = f"{url}/{subpath}"
@@ -84,7 +99,12 @@ def resolve_url(
     revision: str = "main",
     proxy: Optional[str] = None,
     token: Optional[str] = None,
-) -> str:
+) -> Resolved:
+    """Resolve a HF resolve-URL through the proxy and return the final CAS bridge URL.
+
+    The proxy is only used for THIS request — the returned URL is intended
+    to be fetched **directly** (no proxy) by the aria2 daemon.
+    """
     quoted = "/".join(urllib.parse.quote(p) for p in fname.split("/"))
     url = f"https://huggingface.co/{repo_id}/resolve/{revision}/{quoted}"
     with _client(proxy, token) as c:
@@ -92,4 +112,5 @@ def resolve_url(
         if r.status_code >= 400:
             r = c.get(url, headers={"Range": "bytes=0-0"})
         r.raise_for_status()
-        return str(r.url)
+        final = str(r.url)
+    return Resolved(url=final, expires_at=parse_expiry(final), domain=domain_of(final))

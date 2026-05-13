@@ -9,10 +9,10 @@
 - repo: openai-community/gpt2
   dir: ./models/gpt2
   exclude: '\.h5$|\.msgpack$'
-  backend: hf
 
 # - repo: meta-llama/Llama-3.2-1B
 #   dir: ./models/llama-3.2-1b
-#   backend: aria2
+#   proxy: socks5://127.0.0.1:10808
 #   connections: 16
 #   max_retries: 30
+#   refresh_lead: 900   # refresh 15min before expiry instead of 10

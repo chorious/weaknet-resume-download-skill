@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import argparse
-from pathlib import Path
 from typing import List
 
 import yaml
 
-from . import downloader
+from . import engine
 from .config import Config
 
 
@@ -21,13 +19,13 @@ def _parse_yaml(path: str) -> List[Config]:
             repo_id=entry["repo"],
             local_dir=entry["dir"],
             proxy=entry.get("proxy"),
-            backend=entry.get("backend", "hf"),
             include_regex=entry.get("include"),
             exclude_regex=entry.get("exclude"),
             revision=entry.get("revision", "main"),
             connections=int(entry.get("connections", 8)),
             max_retries=int(entry.get("max_retries", 20)),
             stuck_timeout=int(entry.get("stuck_timeout", 120)),
+            refresh_lead_seconds=int(entry.get("refresh_lead", 600)),
             verify_sha256=bool(entry.get("verify", True)),
         ))
     return out
@@ -37,7 +35,7 @@ def run_batch(yaml_path: str) -> int:
     configs = _parse_yaml(yaml_path)
     worst = 0
     for cfg in configs:
-        rc = downloader.run(cfg)
+        rc = engine.run(cfg)
         if rc > worst:
             worst = rc
     return worst

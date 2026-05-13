@@ -1,85 +1,117 @@
 # weaknet-resume-download-skill
 
-Resilient HuggingFace model downloader for weak / flaky networks. Cross-platform Python (Windows / Linux / macOS).
+HuggingFace model downloader for **one specific situation**:
+**huggingface.co is slow/expensive through your proxy, but the CDN (`transfer.xethub.hf.co` / `cdn-lfs.huggingface.co`) is reachable directly and fast.**
 
-Replaces the original bash scripts. The old bash version had three problems:
-1. Linux-only (depended on `bash`, `pgrep`, `systemctl`)
-2. Hardcoded sudo password committed in `net-monitor.sh` (now removed)
-3. No SHA256 verification, no per-file retry budget, no batch config
+## What it does that `huggingface-cli` doesn't
 
-## Features
+1. **Resolves through the proxy, downloads direct.** Only `huggingface.co/.../resolve/...` goes through the SOCKS5/HTTP proxy. The actual file bytes come from the CDN with no proxy.
+2. **Rotates the presigned URL mid-download.** HF's CAS bridge URLs are AWS SigV4 presigned with `X-Amz-Expires=3600` — they die after exactly 1 hour. For multi-GB models that's mid-download. This tool parses the expiry, re-resolves before it hits, and calls **`aria2.changeUri`** to swap the URL inside the running download. **No connection restart, no progress lost.**
+3. **Belt-and-suspenders timing.** Even if the expiry can't be parsed (malformed URL, future format change), there's a 50-minute periodic refresh on a wall clock.
 
-- **Two backends**: `hf` (huggingface_hub + optional `hf_transfer` Rust accelerator) and `aria2` (subprocess wrapper with stuck-detection for very flaky links)
-- **Resume**: native to both backends
-- **SHA256 verification**: uses the LFS `oid` from HF API; mismatched files retry
-- **Manifest state** in `<dir>/.weaknet-dl/manifest.json` — incremental re-runs
-- **Per-file retry budget**: bad files go to `failed.txt`, the run continues
-- **Batch mode**: `repos.yaml` lists many repos
-- **Connectivity probe**: distinguishes DNS / direct / proxy failures (warn-only, no auto recovery — cross-platform safe)
+This is something neither `huggingface-cli`, `hf_transfer`, nor `huggingface-proxy` (the existing Cloudflare-Worker GFW solution) does today.
+
+## Architecture
+
+```
+weaknet-dl ─── httpx ──▶ huggingface.co            (proxied)
+   │                          │
+   │                          ▼ returns presigned CAS URL + expires_at
+   │
+   └── aria2 RPC ─ aria2c ──▶ transfer.xethub.hf.co  (direct, multi-connection)
+            │
+            └─ aria2.changeUri(gid, old, new) before expiry (or every 50 min)
+```
 
 ## Install
 
 ```bash
 pip install -e .
 
-# Optional: Rust-accelerated multi-connection downloads (hf backend)
-pip install hf_transfer
-# then set HF_HUB_ENABLE_HF_TRANSFER=1
-
-# Optional: aria2c (for --backend aria2)
+# Required: aria2c (1.36+)
 #   Windows: winget install aria2.aria2
 #   Debian:  sudo apt install aria2
 #   macOS:   brew install aria2
 ```
 
-## Quick usage
+## Usage
 
 ```bash
-# Single repo, default hf backend
+# Typical: SOCKS5 proxy + filter to one quant
 weaknet-dl download bartowski/Qwen2.5-7B-Instruct-GGUF ./models/qwen \
+    --proxy socks5://127.0.0.1:10808 \
     --include 'Q4_K_M\.gguf$'
 
-# Through a SOCKS5 proxy (e.g. local v2ray on 10808)
-weaknet-dl download owner/repo ./out --proxy socks5://127.0.0.1:10808
+# Via env vars
+WEAKNET_PROXY=socks5://127.0.0.1:10808 HF_TOKEN=hf_xxx \
+    weaknet-dl download owner/repo ./out
 
-# Use aria2 for maximum parallelism on flaky links
-weaknet-dl download owner/repo ./out --backend aria2 --connections 16
+# Manually verify the URL-rotation path works: force refresh after ~1 minute
+weaknet-dl download owner/repo ./out \
+    --proxy socks5://127.0.0.1:10808 \
+    --refresh-lead 3540
 
-# Batch: download many repos
+# Batch
 weaknet-dl batch repos.example.yaml
 
-# Check progress in an existing target dir
+# Status of a previous run (reads .weaknet-dl/manifest.json)
 weaknet-dl status ./models/qwen
 
-# Probe connectivity (one-shot JSON)
+# Diagnose connectivity (one-shot JSON: dns / direct / via_proxy)
 weaknet-dl netmon --target huggingface.co --proxy socks5://127.0.0.1:10808 --once
 ```
+
+## Flags
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--proxy` | none | SOCKS5/HTTP proxy for `/resolve/` only |
+| `--include REGEX` | none | Match filenames to download |
+| `--exclude REGEX` | none | Skip filenames |
+| `--connections N` | 8 | aria2 connections per file |
+| `--max-retries N` | 20 | Per-file retry budget before logging to `failed.txt` |
+| `--stuck-timeout S` | 120 | Seconds of zero progress before aborting current gid |
+| `--refresh-lead S` | 600 | Refresh CAS URL if it dies within S seconds |
+| `--aria2-path PATH` | `aria2c` | Override if aria2c is not on PATH |
+| `--rpc-port N` | 6800 | aria2 RPC listen port |
+| `--no-verify` | off | Skip SHA256 verification (not recommended) |
+| `--dry-run` | off | List files but don't download |
 
 ## Environment variables
 
 | Var | Effect |
 |---|---|
-| `HF_TOKEN` | HuggingFace auth token (gated / private repos) |
-| `WEAKNET_PROXY` | Default `--proxy` value |
-| `WEAKNET_BACKEND` | `hf` or `aria2`, default `hf` |
-| `HF_HUB_ENABLE_HF_TRANSFER` | Set to `1` for Rust accelerator (requires `pip install hf_transfer`) |
+| `HF_TOKEN` | HuggingFace auth (gated/private repos) |
+| `WEAKNET_PROXY` | Default `--proxy` |
+| `WEAKNET_ARIA2` | Default `--aria2-path` |
 
 ## Exit codes
 
-| Code | Meaning |
-|---|---|
-| 0 | All files downloaded and verified |
-| 1 | Partial — some failed; see `<dir>/failed.txt` |
-| 2 | Fatal — auth / network / config error before any work started |
+- `0` — all files downloaded and verified
+- `1` — partial; see `<dir>/failed.txt` for the list
+- `2` — fatal: aria2c missing, auth failure, can't list repo
 
-## Claude Code skill
+## Guarantees
 
-`SKILL.md` in the repo root makes this installable as a Claude Code skill. Place this directory under `~/.claude/skills/` (or symlink) and Claude will auto-invoke it on HF-download requests.
+- **Resume:** aria2's `.aria2` control file + outer retry loop = byte-exact resume on every restart.
+- **Verification:** post-download sha256 against the HF LFS `oid`. Mismatch counts as a failed attempt.
+- **Idempotent:** `<dir>/.weaknet-dl/manifest.json` records verified files; re-runs skip them.
+- **No privilege escalation:** the tool never invokes `sudo`. The aria2 RPC secret is per-session, in-memory only, bound to `127.0.0.1`.
 
-## Legacy bash scripts
+## Tests
 
-The original `aria2-hf-dl.sh`, `robust-dl.sh`, `monitor-dl.sh`, `net-monitor.sh` are gone. The repository was rebuilt from scratch with no git history of the bash scripts. **If you cloned the repo before this rewrite, delete that clone — `net-monitor.sh` embedded a plaintext sudo password and any local copy still carries it.**
+```bash
+pip install -e ".[test]"
+pytest tests/        # all unit tests, no aria2c required
+```
 
-## Security note
+## Origins
 
-This tool never asks for sudo and never invokes `sudo` internally. Auto network-adapter recovery is intentionally not implemented because it requires privilege escalation that varies per OS; `weaknet-dl netmon` only diagnoses and reports.
+This repo started life as four bash scripts. One of them (`net-monitor.sh`) committed a plaintext sudo password to git history — a real fully-publicly-leaked credential. The bash version is gone; this rewrite drops sudo entirely, uses cross-platform Python, and adds the actual unique engineering (URL rotation) instead of the speculative two-backend abstraction the first rewrite had.
+
+## Not goals
+
+- Multi-file parallelism (sequential is more predictable for the rotation logic)
+- Fallback if `aria2c` is missing (the rotation IS the point; without aria2c the tool refuses to run)
+- BitTorrent, generic-URL, or non-HF downloads
+- Auto network-adapter recovery (warn-only via `netmon`; OS-level adapter restart needs privilege escalation that's not cross-platform safe)

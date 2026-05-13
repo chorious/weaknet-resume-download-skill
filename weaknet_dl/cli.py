@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 
 from . import __version__
 from .config import Config
@@ -13,20 +12,25 @@ from .manifest import Manifest
 def _add_dl_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("repo_id", help="HuggingFace repo id, e.g. owner/name")
     p.add_argument("local_dir", help="Local target directory")
-    p.add_argument("--proxy", default=None, help="SOCKS5/HTTP proxy, e.g. socks5://127.0.0.1:10808")
-    p.add_argument("--backend", default=None, choices=["hf", "aria2"], help="Download backend (default: hf)")
+    p.add_argument("--proxy", default=None, help="SOCKS5/HTTP proxy for /resolve/ only, e.g. socks5://127.0.0.1:10808")
     p.add_argument("--include", default=None, help="Regex to include filenames")
     p.add_argument("--exclude", default=None, help="Regex to exclude filenames")
     p.add_argument("--revision", default="main", help="Branch / tag / commit (default: main)")
-    p.add_argument("--connections", type=int, default=8, help="Connections per file (aria2 only)")
+    p.add_argument("--connections", type=int, default=8, help="aria2 connections per file (default 8)")
     p.add_argument("--max-retries", type=int, default=20)
-    p.add_argument("--stuck-timeout", type=int, default=120, help="Seconds without growth before aborting (aria2)")
+    p.add_argument("--stuck-timeout", type=int, default=120, help="Seconds without progress before abort")
+    p.add_argument("--refresh-lead", type=int, default=600, help="Refresh CAS URL if it expires within N seconds (default 600)")
+    p.add_argument("--aria2-path", default=None, help="Path to aria2c binary (default: search PATH)")
+    p.add_argument("--rpc-port", type=int, default=6800, help="aria2 RPC port (default 6800)")
     p.add_argument("--no-verify", action="store_true", help="Skip SHA256 verification")
     p.add_argument("--dry-run", action="store_true", help="List files only, no download")
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="weaknet-dl", description="Resilient HF downloader")
+    parser = argparse.ArgumentParser(
+        prog="weaknet-dl",
+        description="HF downloader: proxy-resolves CAS URLs, hands to aria2c RPC, hot-rotates URLs before expiry.",
+    )
     parser.add_argument("--version", action="version", version=f"weaknet-dl {__version__}")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -48,9 +52,9 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     if args.cmd == "download":
-        from . import downloader
+        from . import engine
         cfg = Config.from_env_and_args(args)
-        return downloader.run(cfg)
+        return engine.run(cfg)
 
     if args.cmd == "batch":
         from .batch import run_batch
