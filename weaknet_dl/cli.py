@@ -22,6 +22,14 @@ def _add_dl_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--refresh-lead", type=int, default=600, help="Refresh CAS URL if it expires within N seconds (default 600)")
     p.add_argument("--aria2-path", default=None, help="Path to aria2c binary (default: search PATH)")
     p.add_argument("--rpc-port", type=int, default=6800, help="aria2 RPC port (default 6800)")
+    p.add_argument("--aria2-proxy", default=None,
+                   help="Route aria2c BYTES through a proxy. Use this when the CDN rate-limits your IP. "
+                        "Typically same value as --proxy, e.g. socks5://127.0.0.1:10808")
+    p.add_argument("--hf-endpoint", default=None,
+                   help="HF API/resolve endpoint (default https://huggingface.co). "
+                        "Set to https://hf-mirror.com for a China community mirror that bypasses CloudFront.")
+    p.add_argument("--min-speed", type=int, default=50 * 1024,
+                   help="bytes/s; sustained avg below this for 60s triggers a rate-limit warning + refresh (default 51200 = 50 KB/s)")
     p.add_argument("--no-verify", action="store_true", help="Skip SHA256 verification")
     p.add_argument("--dry-run", action="store_true", help="List files only, no download")
 

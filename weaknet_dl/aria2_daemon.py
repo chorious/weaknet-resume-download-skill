@@ -26,7 +26,7 @@ class Aria2DaemonError(RuntimeError):
 
 
 def _build_args(cfg: Config, rpc_secret: str) -> list[str]:
-    return [
+    args = [
         cfg.aria2_path,
         "--enable-rpc=true",
         f"--rpc-listen-port={cfg.rpc_port}",
@@ -49,6 +49,12 @@ def _build_args(cfg: Config, rpc_secret: str) -> list[str]:
         "--console-log-level=warn",
         "--summary-interval=0",
     ]
+    if cfg.aria2_proxy:
+        # Route the actual file bytes through a proxy. This changes the
+        # source IP seen by the CDN, which is the documented bypass for
+        # CloudFront/xethub IP-based rate limiting.
+        args.append(f"--all-proxy={cfg.aria2_proxy}")
+    return args
 
 
 def start_daemon(cfg: Config) -> Tuple[subprocess.Popen, aria2p.API, str]:

@@ -2,8 +2,13 @@
 
 This module's I/O **always goes through the configured proxy** — both listing
 files and following the `/resolve/` redirect to obtain the CAS bridge URL.
-The CAS bridge URL itself is then downloaded **directly** (no proxy) by the
-aria2 daemon; see `engine.py`.
+The CAS bridge URL itself is then downloaded **directly** (or through an
+optional separate `aria2_proxy`) by the aria2 daemon; see `engine.py`.
+
+The `endpoint` parameter lets callers target a mirror (e.g.
+``https://hf-mirror.com``) instead of the canonical ``https://huggingface.co``.
+This is the most reliable way to bypass CloudFront / xethub IP-based rate
+limits encountered from China.
 """
 from __future__ import annotations
 
@@ -18,6 +23,8 @@ import httpx
 
 from .cas_url import domain_of, parse_expiry
 from .config import LARGE_EXTS
+
+DEFAULT_ENDPOINT = "https://huggingface.co"
 
 
 @dataclass
@@ -43,8 +50,15 @@ def _client(proxy: Optional[str], token: Optional[str]) -> httpx.Client:
     return httpx.Client(**kwargs)
 
 
-def _walk_tree(client: httpx.Client, repo_id: str, revision: str, subpath: str = "") -> Iterator[dict]:
-    url = f"https://huggingface.co/api/models/{repo_id}/tree/{revision}"
+def _walk_tree(
+    client: httpx.Client,
+    endpoint: str,
+    repo_id: str,
+    revision: str,
+    subpath: str = "",
+) -> Iterator[dict]:
+    base = endpoint.rstrip("/")
+    url = f"{base}/api/models/{repo_id}/tree/{revision}"
     if subpath:
         url = f"{url}/{subpath}"
     cursor: Optional[str] = None
@@ -57,7 +71,7 @@ def _walk_tree(client: httpx.Client, repo_id: str, revision: str, subpath: str =
             break
         for e in entries:
             if e.get("type") == "directory":
-                yield from _walk_tree(client, repo_id, revision, e["path"])
+                yield from _walk_tree(client, endpoint, repo_id, revision, e["path"])
             else:
                 yield e
         link = r.headers.get("link", "")
@@ -74,11 +88,12 @@ def list_files(
     token: Optional[str] = None,
     include_regex: Optional[str] = None,
     exclude_regex: Optional[str] = None,
+    endpoint: str = DEFAULT_ENDPOINT,
 ) -> Iterator[HFFile]:
     inc = re.compile(include_regex) if include_regex else None
     exc = re.compile(exclude_regex) if exclude_regex else None
     with _client(proxy, token) as c:
-        for e in _walk_tree(c, repo_id, revision):
+        for e in _walk_tree(c, endpoint, repo_id, revision):
             fname = e.get("path", "")
             if not fname or Path(fname).name.startswith("."):
                 continue
@@ -99,14 +114,12 @@ def resolve_url(
     revision: str = "main",
     proxy: Optional[str] = None,
     token: Optional[str] = None,
+    endpoint: str = DEFAULT_ENDPOINT,
 ) -> Resolved:
-    """Resolve a HF resolve-URL through the proxy and return the final CAS bridge URL.
-
-    The proxy is only used for THIS request — the returned URL is intended
-    to be fetched **directly** (no proxy) by the aria2 daemon.
-    """
+    """Resolve a HF resolve-URL through the proxy and return the final CAS bridge URL."""
     quoted = "/".join(urllib.parse.quote(p) for p in fname.split("/"))
-    url = f"https://huggingface.co/{repo_id}/resolve/{revision}/{quoted}"
+    base = endpoint.rstrip("/")
+    url = f"{base}/{repo_id}/resolve/{revision}/{quoted}"
     with _client(proxy, token) as c:
         r = c.head(url)
         if r.status_code >= 400:

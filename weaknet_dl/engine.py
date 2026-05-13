@@ -10,17 +10,23 @@ For each HF file:
    ``aria2.changeUri(gid, 1, [old_url], [new_url])``. aria2 transparently uses
    the new URL for subsequent range requests; in-flight connections are not
    restarted.
-5. Stuck detection: if ``completedLength`` does not grow for stuck_timeout
-   seconds, abort the gid and return failure so the outer retry loop can
-   resume with a fresh URL.
+5. **Stall detection has two layers:**
+   - Hard stall: ``completedLength`` does not grow for ``stuck_timeout`` seconds.
+     Abort the gid; outer retry resumes from the ``.aria2`` control file.
+   - Slow stall (rate-limit): rolling 60s average ``downloadSpeed`` drops below
+     ``min_speed_threshold``. Trigger a refresh (cheap, often masks transient
+     issues) and emit a clear WARN pointing at ``--aria2-proxy`` and
+     ``--hf-endpoint`` as the real mitigations. Cooldown prevents spam.
+6. Status line every ``status_log_interval`` seconds with %, speed, conn, TTL.
 """
 from __future__ import annotations
 
+import collections
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Deque, List, Optional, Tuple
 
 from .aria2_daemon import Aria2DaemonError, start_daemon, stop_daemon
 from .config import Config
@@ -30,6 +36,7 @@ from .verify import verify
 
 
 POLL_INTERVAL = 2.0
+SPEED_WINDOW_SECONDS = 60.0
 
 
 def _log(msg: str) -> None:
@@ -38,6 +45,18 @@ def _log(msg: str) -> None:
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _fmt_bytes(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}PB"
+
+
+def _fmt_speed(bps: float) -> str:
+    return _fmt_bytes(int(bps)) + "/s"
 
 
 @dataclass
@@ -54,16 +73,21 @@ class _Track:
     current_url: str
     expires_at: datetime
     last_refresh: datetime
+    started_at: float = 0.0
     last_completed: int = 0
     last_progress_at: float = 0.0
+    last_status_log_at: float = 0.0
+    last_rate_limit_action_at: float = 0.0
+    speed_window: Deque[Tuple[float, int]] = field(default_factory=collections.deque)
 
 
 class Engine:
     """Owns the aria2 daemon and drives one-file-at-a-time downloads."""
 
-    def __init__(self, cfg: Config, api=None, proc=None):
-        # api/proc injectable for tests; in production we start the daemon ourselves
+    def __init__(self, cfg: Config, api=None, proc=None, clock=None):
+        # api/proc/clock injectable for tests; in production we start the daemon ourselves
         self.cfg = cfg
+        self._clock = clock or time.time
         if api is None:
             self.proc, self.api, _ = start_daemon(cfg)
             self._owns_daemon = True
@@ -93,12 +117,15 @@ class Engine:
         except Exception as e:
             return DownloadResult(ok=False, error=f"aria2 add_uri failed: {type(e).__name__}: {e}")
 
+        now = self._clock()
         track = _Track(
             f=f, dest=dest,
             current_url=resolved.url,
             expires_at=resolved.expires_at,
             last_refresh=_utcnow(),
-            last_progress_at=time.time(),
+            started_at=now,
+            last_progress_at=now,
+            last_status_log_at=now,
         )
         return self._poll_until_done(gid, track)
 
@@ -106,6 +133,7 @@ class Engine:
         return resolve_url(
             self.cfg.repo_id, f.path, self.cfg.revision,
             self.cfg.proxy, self.cfg.hf_token,
+            endpoint=self.cfg.hf_endpoint,
         )
 
     def _should_refresh(self, t: _Track) -> bool:
@@ -132,13 +160,52 @@ class Engine:
         t.expires_at = new.expires_at
         t.last_refresh = _utcnow()
 
+    def _avg_speed_60s(self, t: _Track, now: float) -> float:
+        # Drop samples older than SPEED_WINDOW_SECONDS
+        while t.speed_window and now - t.speed_window[0][0] > SPEED_WINDOW_SECONDS:
+            t.speed_window.popleft()
+        if not t.speed_window:
+            return 0.0
+        return sum(s for _, s in t.speed_window) / len(t.speed_window)
+
+    def _handle_rate_limit(self, gid: str, t: _Track, now: float, avg_bps: float) -> None:
+        t.last_rate_limit_action_at = now
+        _log(
+            f"  ⚠ WARN: avg speed {_fmt_speed(avg_bps)} over last 60s "
+            f"(below {_fmt_speed(self.cfg.min_speed_threshold)}). "
+            f"CloudFront/xethub likely rate-limited this IP."
+        )
+        _log(
+            "         Real bypass = change source IP. Either:"
+        )
+        _log("           1. --aria2-proxy socks5://127.0.0.1:10808  (route bytes via proxy)")
+        _log("           2. --hf-endpoint https://hf-mirror.com     (different origin entirely)")
+        _log("           3. Pause 30+ min — token bucket refills.")
+        # Refresh URL anyway: cheap, occasionally helps if the issue is signature side
+        self._refresh(gid, t)
+
+    def _maybe_status_log(self, t: _Track, now: float, completed: int, total: int,
+                          speed_bps: int, conns: int) -> None:
+        if now - t.last_status_log_at < self.cfg.status_log_interval:
+            return
+        t.last_status_log_at = now
+        pct = (100.0 * completed / total) if total else 0.0
+        ttl = (t.expires_at - _utcnow()).total_seconds()
+        ttl_min = max(0, int(ttl // 60))
+        _log(
+            f"  {_fmt_bytes(completed)} / {_fmt_bytes(total)}  ({pct:.1f}%)  "
+            f"speed={_fmt_speed(speed_bps)}  conn={conns}  url_ttl={ttl_min}min"
+        )
+
     def _poll_until_done(self, gid: str, t: _Track) -> DownloadResult:
         while True:
             time.sleep(POLL_INTERVAL)
             try:
                 status = self.api.client.tell_status(
                     gid,
-                    keys=["status", "completedLength", "totalLength", "errorCode", "errorMessage"],
+                    keys=["status", "completedLength", "totalLength",
+                          "downloadSpeed", "connections",
+                          "errorCode", "errorMessage"],
                 )
             except Exception as e:
                 return DownloadResult(ok=False, error=f"tell_status failed: {type(e).__name__}: {e}")
@@ -146,6 +213,8 @@ class Engine:
             state = status.get("status")
             completed = int(status.get("completedLength") or 0)
             total = int(status.get("totalLength") or 0)
+            speed_bps = int(status.get("downloadSpeed") or 0)
+            conns = int(status.get("connections") or 0)
 
             if state == "complete":
                 try:
@@ -165,7 +234,9 @@ class Engine:
             if state == "removed":
                 return DownloadResult(ok=False, bytes_written=completed, error="aria2: removed externally")
 
-            now = time.time()
+            now = self._clock()
+
+            # Hard stall: completedLength has not grown at all
             if completed != t.last_completed:
                 t.last_completed = completed
                 t.last_progress_at = now
@@ -179,6 +250,20 @@ class Engine:
                     error=f"stuck (no progress {self.cfg.stuck_timeout}s)",
                 )
 
+            # Slow-stall (CDN rate-limit) detection
+            t.speed_window.append((now, speed_bps))
+            elapsed_since_start = now - t.started_at
+            elapsed_since_action = now - t.last_rate_limit_action_at
+            if elapsed_since_start >= SPEED_WINDOW_SECONDS \
+                    and elapsed_since_action >= self.cfg.rate_limit_cooldown_seconds:
+                avg = self._avg_speed_60s(t, now)
+                if avg < self.cfg.min_speed_threshold:
+                    self._handle_rate_limit(gid, t, now, avg)
+
+            # Periodic status line
+            self._maybe_status_log(t, now, completed, total, speed_bps, conns)
+
+            # Time-based / expiry-based URL refresh
             if self._should_refresh(t):
                 self._refresh(gid, t)
 
@@ -191,12 +276,16 @@ def run(cfg: Config) -> int:
     manifest.revision = cfg.revision
 
     _log("=== weaknet-dl ===")
-    _log(f"repo={cfg.repo_id} dir={cfg.local_dir} proxy={cfg.proxy or '-'}")
+    _log(
+        f"repo={cfg.repo_id} dir={cfg.local_dir} proxy={cfg.proxy or '-'} "
+        f"endpoint={cfg.hf_endpoint} aria2_proxy={cfg.aria2_proxy or '-'}"
+    )
 
     try:
         files: List[HFFile] = list(list_files(
             cfg.repo_id, cfg.revision, cfg.proxy, cfg.hf_token,
             cfg.include_regex, cfg.exclude_regex,
+            endpoint=cfg.hf_endpoint,
         ))
     except Exception as e:
         _log(f"FATAL: list_files failed: {type(e).__name__}: {e}")

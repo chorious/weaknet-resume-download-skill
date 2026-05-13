@@ -22,10 +22,13 @@ def _parse_yaml(path: str) -> List[Config]:
             include_regex=entry.get("include"),
             exclude_regex=entry.get("exclude"),
             revision=entry.get("revision", "main"),
+            hf_endpoint=entry.get("hf_endpoint", "https://huggingface.co"),
+            aria2_proxy=entry.get("aria2_proxy"),
             connections=int(entry.get("connections", 8)),
             max_retries=int(entry.get("max_retries", 20)),
             stuck_timeout=int(entry.get("stuck_timeout", 120)),
             refresh_lead_seconds=int(entry.get("refresh_lead", 600)),
+            min_speed_threshold=int(entry.get("min_speed", 50 * 1024)),
             verify_sha256=bool(entry.get("verify", True)),
         ))
     return out
