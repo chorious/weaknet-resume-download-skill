@@ -1,0 +1,18 @@
+# weaknet-dl batch config — list of repos to download sequentially.
+# Run with:  weaknet-dl batch repos.example.yaml
+
+- repo: bartowski/Qwen2.5-7B-Instruct-GGUF
+  dir: ./models/qwen-7b
+  include: 'Q4_K_M\.gguf$'
+  proxy: socks5://127.0.0.1:10808
+
+- repo: openai-community/gpt2
+  dir: ./models/gpt2
+  exclude: '\.h5$|\.msgpack$'
+  backend: hf
+
+# - repo: meta-llama/Llama-3.2-1B
+#   dir: ./models/llama-3.2-1b
+#   backend: aria2
+#   connections: 16
+#   max_retries: 30
