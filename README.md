@@ -65,7 +65,11 @@ weaknet-dl netmon --target huggingface.co --proxy socks5://127.0.0.1:10808 --onc
 
 You may see download speed start at ~10 MB/s and slowly decay to 400 → 200 → 100 KB/s → 0 over ~10 minutes. **This is AWS CloudFront / xethub rate-limiting your source IP**, not an aria2 problem and not a URL-expiry problem. Token-bucket limits attach to **source IP**, not to the URL signature, so re-resolving alone doesn't help. (`v0.4` confirms this via a 60-second rolling speed window and surfaces a clear warning when it triggers.)
 
-Three real mitigations, in order of effectiveness:
+**Default behaviour (v0.5+):** when the rate-limit condition is detected, the engine automatically switches the in-flight aria2 download to **modelscope.cn** (Alibaba Cloud, different origin entirely) via `aria2.changeUri`. ModelScope URLs do not expire, so once switched the URL-rotation cycle stops and resume continues byte-exact from the `.aria2` control file. Disable with `--no-ms-fallback`. If the HF and MS namespaces differ for the model, pass `--ms-repo-id owner/name`.
+
+Additionally, **User-Agent is spoofed by default** (Chrome on Linux) for both the httpx resolver and aria2c, since some CDN edge configs throttle the default `python-httpx/x.y` and `aria2/x.y` UA strings. Override with `--user-agent` if you need a specific one.
+
+If ModelScope is also rate-limited (uncommon), three remaining mitigations, in order of effectiveness:
 
 ```bash
 # 1. Route bytes through a proxy with a different exit IP (most effective).
@@ -95,8 +99,12 @@ You can combine `--aria2-proxy` with the original `--proxy` (typically the same 
 | `--connections N` | 8 | aria2 connections per file |
 | `--max-retries N` | 20 | Per-file retry budget before logging to `failed.txt` |
 | `--stuck-timeout S` | 120 | Seconds of zero progress before aborting current gid |
-| `--min-speed BPS` | 51200 | Sustained avg below this for 60s triggers rate-limit warning + refresh |
+| `--min-speed BPS` | 51200 | Sustained avg below this for 60s triggers rate-limit mitigation (MS fallback, then refresh) |
 | `--refresh-lead S` | 600 | Refresh CAS URL if it dies within S seconds |
+| `--user-agent UA` | Chrome-on-Linux | UA sent by both httpx (resolve) and aria2c (downloads) |
+| `--no-ms-fallback` | off | Disable auto-switch to modelscope.cn on sustained rate-limit |
+| `--ms-repo-id ID` | same as HF | ModelScope repo id when the namespace differs from HF |
+| `--ms-endpoint URL` | `https://modelscope.cn` | ModelScope endpoint override |
 | `--aria2-path PATH` | `aria2c` | Override if aria2c is not on PATH |
 | `--rpc-port N` | 6800 | aria2 RPC listen port |
 | `--no-verify` | off | Skip SHA256 verification (not recommended) |
@@ -111,6 +119,9 @@ You can combine `--aria2-proxy` with the original `--proxy` (typically the same 
 | `WEAKNET_PROXY` | Default `--proxy` |
 | `WEAKNET_ARIA2_PROXY` | Default `--aria2-proxy` |
 | `WEAKNET_ARIA2` | Default `--aria2-path` |
+| `WEAKNET_USER_AGENT` | Default `--user-agent` |
+| `WEAKNET_MS_REPO_ID` | Default `--ms-repo-id` |
+| `WEAKNET_MS_ENDPOINT` | Default `--ms-endpoint` |
 
 ## Exit codes
 
