@@ -31,6 +31,7 @@ from typing import Deque, List, Optional, Tuple
 from .aria2_daemon import Aria2DaemonError, start_daemon, stop_daemon
 from .config import Config
 from .hf_api import HFFile, Resolved, list_files, resolve_url
+from . import ms_api
 from .manifest import Manifest
 from .verify import verify
 
@@ -79,6 +80,9 @@ class _Track:
     last_status_log_at: float = 0.0
     last_rate_limit_action_at: float = 0.0
     speed_window: Deque[Tuple[float, int]] = field(default_factory=collections.deque)
+    # True once we've switched this download to a ModelScope URL. MS URLs do
+    # not expire, so the refresh path becomes a no-op afterwards.
+    on_modelscope: bool = False
 
 
 class Engine:
@@ -134,9 +138,20 @@ class Engine:
             self.cfg.repo_id, f.path, self.cfg.revision,
             self.cfg.proxy, self.cfg.hf_token,
             endpoint=self.cfg.hf_endpoint,
+            user_agent=self.cfg.user_agent,
+        )
+
+    def _resolve_ms(self, f: HFFile) -> Resolved:
+        ms_repo = self.cfg.ms_repo_id or self.cfg.repo_id
+        return ms_api.resolve_url(
+            ms_repo, f.path, self.cfg.ms_revision,
+            endpoint=self.cfg.ms_endpoint,
         )
 
     def _should_refresh(self, t: _Track) -> bool:
+        # MS URLs do not expire; skip the rotation dance once we've switched.
+        if t.on_modelscope:
+            return False
         now = _utcnow()
         if (t.expires_at - now).total_seconds() <= self.cfg.refresh_lead_seconds:
             return True
@@ -170,19 +185,58 @@ class Engine:
 
     def _handle_rate_limit(self, gid: str, t: _Track, now: float, avg_bps: float) -> None:
         t.last_rate_limit_action_at = now
+        if t.on_modelscope:
+            # Already on MS and still slow — refreshing would put us back on
+            # HF (bad). Just warn so the user knows; no auto-action available.
+            _log(
+                f"  ⚠ WARN: avg speed {_fmt_speed(avg_bps)} on modelscope.cn "
+                f"(below {_fmt_speed(self.cfg.min_speed_threshold)}). "
+                f"MS is also slow; --aria2-proxy may be the only remaining lever."
+            )
+            return
         _log(
             f"  ⚠ WARN: avg speed {_fmt_speed(avg_bps)} over last 60s "
             f"(below {_fmt_speed(self.cfg.min_speed_threshold)}). "
             f"CloudFront/xethub likely rate-limited this IP."
         )
-        _log(
-            "         Real bypass = change source IP. Either:"
-        )
+        # Preferred mitigation: switch to ModelScope (Alibaba Cloud, different
+        # origin and IP range entirely). MS URLs don't expire, so once we're
+        # switched we stop the refresh cycle.
+        if self.cfg.ms_fallback and self._switch_to_modelscope(gid, t):
+            return
+        _log("         Real bypass = change source IP. Either:")
         _log("           1. --aria2-proxy socks5://127.0.0.1:10808  (route bytes via proxy)")
         _log("           2. --hf-endpoint https://hf-mirror.com     (different origin entirely)")
         _log("           3. Pause 30+ min — token bucket refills.")
         # Refresh URL anyway: cheap, occasionally helps if the issue is signature side
         self._refresh(gid, t)
+
+    def _switch_to_modelscope(self, gid: str, t: _Track) -> bool:
+        """Swap the in-flight aria2 download from HF CDN to modelscope.cn.
+
+        Returns True if the switch succeeded. Resume continues byte-exact
+        because aria2 keeps the .aria2 control file regardless of which URL
+        serves the next Range request.
+        """
+        ms_repo = self.cfg.ms_repo_id or self.cfg.repo_id
+        try:
+            new = self._resolve_ms(t.f)
+        except Exception as e:
+            _log(f"  ms-fallback: resolve failed ({type(e).__name__}: {e})")
+            return False
+        try:
+            self.api.client.change_uri(gid, 1, [t.current_url], [new.url])
+        except Exception as e:
+            _log(f"  ms-fallback: change_uri failed ({type(e).__name__}: {e})")
+            return False
+        _log(
+            f"  ms-fallback: switched to modelscope.cn (repo={ms_repo}, file={t.f.path})"
+        )
+        t.current_url = new.url
+        t.expires_at = new.expires_at
+        t.last_refresh = _utcnow()
+        t.on_modelscope = True
+        return True
 
     def _maybe_status_log(self, t: _Track, now: float, completed: int, total: int,
                           speed_bps: int, conns: int) -> None:
@@ -286,6 +340,7 @@ def run(cfg: Config) -> int:
             cfg.repo_id, cfg.revision, cfg.proxy, cfg.hf_token,
             cfg.include_regex, cfg.exclude_regex,
             endpoint=cfg.hf_endpoint,
+            user_agent=cfg.user_agent,
         ))
     except Exception as e:
         _log(f"FATAL: list_files failed: {type(e).__name__}: {e}")

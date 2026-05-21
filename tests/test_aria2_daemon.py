@@ -32,3 +32,16 @@ def test_build_args_binds_rpc_to_localhost():
     """RPC must not be accessible from LAN — rpc-listen-all=false."""
     args = _build_args(_cfg(), rpc_secret="SECRET")
     assert "--rpc-listen-all=false" in args
+
+
+def test_build_args_passes_user_agent_when_set():
+    cfg = _cfg(user_agent="Mozilla/5.0 (X11; Linux x86_64) Chrome/131")
+    args = _build_args(cfg, rpc_secret="SECRET")
+    ua_flags = [a for a in args if a.startswith("--user-agent=")]
+    assert ua_flags == ["--user-agent=Mozilla/5.0 (X11; Linux x86_64) Chrome/131"]
+
+
+def test_build_args_omits_user_agent_when_empty():
+    cfg = _cfg(user_agent="")
+    args = _build_args(cfg, rpc_secret="SECRET")
+    assert not any(a.startswith("--user-agent=") for a in args)

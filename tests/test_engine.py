@@ -26,6 +26,9 @@ def _cfg(tmp_path, **over):
         min_speed_threshold=50 * 1024,
         rate_limit_cooldown_seconds=300,
         status_log_interval=30,
+        # Most legacy tests assume the HF-only behaviour; opt MS fallback off
+        # unless a test explicitly enables it.
+        ms_fallback=False,
     )
     base.update(over)
     return Config(**base)
@@ -248,6 +251,98 @@ def test_high_speed_no_rate_limit_warning(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "WARN" not in out
     assert "rate-limit" not in out.lower()
+
+
+def test_ms_fallback_switches_url_on_rate_limit(tmp_path, capsys):
+    """When ms_fallback is on, sustained low speed switches the in-flight URL to modelscope.cn."""
+    cfg = _cfg(tmp_path,
+               ms_fallback=True,
+               min_speed_threshold=50 * 1024,
+               rate_limit_cooldown_seconds=10_000,
+               status_log_interval=10_000)
+    eng, api = _make_engine(cfg, clock=_virtual_clock(step=5.0))
+    api.client.add_uri.return_value = "GID_MS"
+    samples = [
+        {"status": "active",
+         "completedLength": str(100 * i),
+         "totalLength": "1000000",
+         "downloadSpeed": "10240",
+         "connections": "2"}
+        for i in range(1, 20)
+    ]
+    samples.append({"status": "complete", "completedLength": "1000000",
+                    "totalLength": "1000000", "downloadSpeed": "0", "connections": "0"})
+    api.client.tell_status.side_effect = samples
+
+    hf_resolved = Resolved(
+        url="https://cdn.huggingface.co/blob/abc?X-Amz-Signature=x",
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        domain="cdn.huggingface.co",
+    )
+    ms_resolved = Resolved(
+        url="https://modelscope.cn/api/v1/models/owner/repo/repo?Revision=master&FilePath=f.bin",
+        expires_at=datetime.now(timezone.utc) + timedelta(days=365),
+        domain="modelscope.cn",
+    )
+    with patch.object(eng, "_resolve", return_value=hf_resolved), \
+         patch.object(eng, "_resolve_ms", return_value=ms_resolved), \
+         patch("weaknet_dl.engine.POLL_INTERVAL", 0):
+        res = eng.download(HFFile(path="f.bin", size=1000000, sha256=None, is_lfs=True),
+                           tmp_path / "f.bin")
+
+    assert res.ok is True
+    api.client.change_uri.assert_called_once()
+    new_url = api.client.change_uri.call_args.args[3][0]
+    assert "modelscope.cn" in new_url
+    out = capsys.readouterr().out
+    assert "ms-fallback" in out
+    # The advice block about --aria2-proxy / --hf-endpoint must NOT appear when
+    # the fallback succeeded — we already solved the problem.
+    assert "--aria2-proxy" not in out
+    assert "--hf-endpoint" not in out
+
+
+def test_ms_fallback_no_double_switch(tmp_path):
+    """Once switched to MS, refresh/rate-limit handlers must not switch again."""
+    cfg = _cfg(tmp_path,
+               ms_fallback=True,
+               min_speed_threshold=50 * 1024,
+               rate_limit_cooldown_seconds=0,  # allow repeated triggers
+               status_log_interval=10_000)
+    eng, api = _make_engine(cfg, clock=_virtual_clock(step=5.0))
+    api.client.add_uri.return_value = "GID_MS2"
+    samples = [
+        {"status": "active",
+         "completedLength": str(100 * i),
+         "totalLength": "1000000",
+         "downloadSpeed": "10240",
+         "connections": "2"}
+        for i in range(1, 30)
+    ]
+    samples.append({"status": "complete", "completedLength": "1000000",
+                    "totalLength": "1000000", "downloadSpeed": "0", "connections": "0"})
+    api.client.tell_status.side_effect = samples
+
+    hf_resolved = Resolved(
+        url="https://cdn/x",
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        domain="cdn",
+    )
+    ms_resolved = Resolved(
+        url="https://modelscope.cn/api/v1/models/owner/repo/repo?Revision=master&FilePath=f.bin",
+        expires_at=datetime.now(timezone.utc) + timedelta(days=365),
+        domain="modelscope.cn",
+    )
+    with patch.object(eng, "_resolve", return_value=hf_resolved), \
+         patch.object(eng, "_resolve_ms", return_value=ms_resolved), \
+         patch("weaknet_dl.engine.POLL_INTERVAL", 0):
+        res = eng.download(HFFile(path="f.bin", size=1000000, sha256=None, is_lfs=True),
+                           tmp_path / "f.bin")
+
+    assert res.ok is True
+    # Exactly one switch — subsequent rate-limit triggers must not call
+    # change_uri again because we're already on MS (URL is permanent).
+    assert api.client.change_uri.call_count == 1
 
 
 def test_status_line_logged_at_interval(tmp_path, capsys):

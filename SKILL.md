@@ -99,6 +99,9 @@ weaknet-dl status ./models/qwen
 | `WEAKNET_PROXY` | Default `--proxy` |
 | `WEAKNET_ARIA2_PROXY` | Default `--aria2-proxy` (route bytes through proxy) |
 | `WEAKNET_ARIA2` | Path to `aria2c` binary if not in PATH |
+| `WEAKNET_USER_AGENT` | Default `--user-agent` (default Chrome-on-Linux UA; mitigates CDN UA blocks) |
+| `WEAKNET_MS_REPO_ID` | Default `--ms-repo-id` (when MS namespace differs from HF) |
+| `WEAKNET_MS_ENDPOINT` | Default `--ms-endpoint` (default `https://modelscope.cn`) |
 
 ## Exit codes
 
@@ -115,7 +118,8 @@ weaknet-dl status ./models/qwen
 - **Manifest state:** `<dir>/.weaknet-dl/manifest.json` records verified files. Re-runs skip them.
 - **Per-file budget:** `--max-retries` (default 20). On exhaustion, file goes to `failed.txt`, the run continues.
 - **Hard stall detection:** no `completedLength` growth for `--stuck-timeout` seconds (default 120) → abort gid → outer retry resumes with fresh URL.
-- **Slow stall (CDN rate-limit) detection:** rolling 60-second average `downloadSpeed` below `--min-speed` (default 50 KB/s) → WARN + URL refresh + advice. Cooldown prevents spam.
+- **Slow stall (CDN rate-limit) detection:** rolling 60-second average `downloadSpeed` below `--min-speed` (default 50 KB/s) → WARN + automatic switch of the in-flight aria2 download to `modelscope.cn` via `aria2.changeUri` (resume continues byte-exact). Disable with `--no-ms-fallback`; override the MS repo id with `--ms-repo-id owner/name` when the namespace differs. If MS also runs slow, only manual `--aria2-proxy` / `--hf-endpoint` remains. Cooldown prevents spam.
+- **User-Agent spoofing:** both the httpx resolver and aria2c send a Chrome-on-Linux UA by default, since some CDN edge configs throttle `python-httpx/x.y` and `aria2/x.y` default UAs. Override with `--user-agent`.
 - **Periodic status line** every 30s: `<bytes_done>/<total>  speed=...  conn=N  url_ttl=Nmin`
 - **No sudo:** the deprecated bash version embedded a hardcoded sudo password; this tool never invokes sudo. Auto network recovery is intentionally not implemented (cross-platform safe).
 - **No leaked secrets:** the aria2 RPC secret is `secrets.token_urlsafe(24)` per session, bound to `127.0.0.1` only, never written to disk.

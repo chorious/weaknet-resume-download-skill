@@ -42,8 +42,16 @@ class Resolved:
     domain: str
 
 
-def _client(proxy: Optional[str], token: Optional[str]) -> httpx.Client:
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
+def _client(
+    proxy: Optional[str],
+    token: Optional[str],
+    user_agent: Optional[str] = None,
+) -> httpx.Client:
+    headers: dict[str, str] = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if user_agent:
+        headers["User-Agent"] = user_agent
     kwargs = {"timeout": 60.0, "headers": headers, "follow_redirects": True}
     if proxy:
         kwargs["proxy"] = proxy
@@ -89,10 +97,11 @@ def list_files(
     include_regex: Optional[str] = None,
     exclude_regex: Optional[str] = None,
     endpoint: str = DEFAULT_ENDPOINT,
+    user_agent: Optional[str] = None,
 ) -> Iterator[HFFile]:
     inc = re.compile(include_regex) if include_regex else None
     exc = re.compile(exclude_regex) if exclude_regex else None
-    with _client(proxy, token) as c:
+    with _client(proxy, token, user_agent) as c:
         for e in _walk_tree(c, endpoint, repo_id, revision):
             fname = e.get("path", "")
             if not fname or Path(fname).name.startswith("."):
@@ -115,12 +124,13 @@ def resolve_url(
     proxy: Optional[str] = None,
     token: Optional[str] = None,
     endpoint: str = DEFAULT_ENDPOINT,
+    user_agent: Optional[str] = None,
 ) -> Resolved:
     """Resolve a HF resolve-URL through the proxy and return the final CAS bridge URL."""
     quoted = "/".join(urllib.parse.quote(p) for p in fname.split("/"))
     base = endpoint.rstrip("/")
     url = f"{base}/{repo_id}/resolve/{revision}/{quoted}"
-    with _client(proxy, token) as c:
+    with _client(proxy, token, user_agent) as c:
         r = c.head(url)
         if r.status_code >= 400:
             r = c.get(url, headers={"Range": "bytes=0-0"})

@@ -30,6 +30,18 @@ def _add_dl_args(p: argparse.ArgumentParser) -> None:
                         "Set to https://hf-mirror.com for a China community mirror that bypasses CloudFront.")
     p.add_argument("--min-speed", type=int, default=50 * 1024,
                    help="bytes/s; sustained avg below this for 60s triggers a rate-limit warning + refresh (default 51200 = 50 KB/s)")
+    p.add_argument("--user-agent", default=None,
+                   help="Override User-Agent for both httpx (HF resolve) and aria2c. "
+                        "Default mimics Chrome on Linux to avoid CDN UA-based blocking.")
+    p.add_argument("--no-ms-fallback", action="store_true",
+                   help="Disable automatic switch to modelscope.cn when the CDN sustains a low-speed rate-limit. "
+                        "Default: enabled. See --ms-repo-id if the namespace differs on ModelScope.")
+    p.add_argument("--ms-repo-id", default=None,
+                   help="ModelScope repo id (default: same as the HF repo id). "
+                        "Many HF repos are mirrored under the same owner/name on modelscope.cn; "
+                        "override when they differ.")
+    p.add_argument("--ms-endpoint", default=None,
+                   help="ModelScope endpoint (default https://modelscope.cn).")
     p.add_argument("--no-verify", action="store_true", help="Skip SHA256 verification")
     p.add_argument("--dry-run", action="store_true", help="List files only, no download")
 

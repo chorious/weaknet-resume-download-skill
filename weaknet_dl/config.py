@@ -9,6 +9,17 @@ LARGE_EXTS = (
     ".onnx", ".ckpt", ".msgpack", ".tflite",
 )
 
+# Chrome 131 on Linux x86_64. Used as the default UA so CDN fingerprinting that
+# rejects python-httpx / aria2/x.y default UAs doesn't kick in. Linux UA is the
+# safest default because the script's primary deployment is Linux servers; CDNs
+# don't care about the OS token, only that the UA looks like a real browser.
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+MODELSCOPE_ENDPOINT = "https://modelscope.cn"
+
 
 @dataclass
 class Config:
@@ -22,6 +33,20 @@ class Config:
 
     # HF endpoint (defaults to upstream; set to https://hf-mirror.com to bypass CDN limits)
     hf_endpoint: str = "https://huggingface.co"
+
+    # User-Agent applied to both httpx (resolve calls) and aria2c (--user-agent).
+    # Defaults to a Chrome-on-Linux UA — CDNs rarely block real-browser UAs.
+    user_agent: str = DEFAULT_USER_AGENT
+
+    # ModelScope fallback. When the HF CDN sustains a low-speed rate-limit
+    # condition, the engine can switch the in-flight aria2 download to a
+    # ModelScope URL via aria2.changeUri (MS URLs do not expire, so no rotation
+    # is needed after switching). Same repo_id is tried by default; users can
+    # override with --ms-repo-id when the namespace differs on MS.
+    ms_fallback: bool = True
+    ms_repo_id: Optional[str] = None
+    ms_endpoint: str = MODELSCOPE_ENDPOINT
+    ms_revision: str = "master"
 
     # aria2 daemon
     aria2_path: str = "aria2c"
@@ -62,6 +87,10 @@ class Config:
             aria2_path=args.aria2_path or os.environ.get("WEAKNET_ARIA2", "aria2c"),
             rpc_port=args.rpc_port,
             aria2_proxy=args.aria2_proxy or os.environ.get("WEAKNET_ARIA2_PROXY"),
+            user_agent=args.user_agent or os.environ.get("WEAKNET_USER_AGENT", DEFAULT_USER_AGENT),
+            ms_fallback=not args.no_ms_fallback,
+            ms_repo_id=args.ms_repo_id or os.environ.get("WEAKNET_MS_REPO_ID"),
+            ms_endpoint=args.ms_endpoint or os.environ.get("WEAKNET_MS_ENDPOINT", MODELSCOPE_ENDPOINT),
             connections=args.connections,
             max_retries=args.max_retries,
             stuck_timeout=args.stuck_timeout,

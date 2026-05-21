@@ -49,6 +49,10 @@ def _build_args(cfg: Config, rpc_secret: str) -> list[str]:
         "--console-log-level=warn",
         "--summary-interval=0",
     ]
+    if cfg.user_agent:
+        # CDNs (CloudFront, modelscope's nginx) sometimes block or rate-limit
+        # default aria2/x.y UAs. Spoofing to a real-browser UA neutralizes that.
+        args.append(f"--user-agent={cfg.user_agent}")
     if cfg.aria2_proxy:
         # Route the actual file bytes through a proxy. This changes the
         # source IP seen by the CDN, which is the documented bypass for

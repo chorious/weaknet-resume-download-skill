@@ -46,3 +46,13 @@ def test_resolve_url_default_endpoint_is_huggingface():
         resolve_url("owner/repo", "model.bin")
     requested_url = mock_client.head.call_args.args[0]
     assert requested_url.startswith("https://huggingface.co/")
+
+
+def test_resolve_url_passes_user_agent_to_client():
+    """The configured UA must be forwarded into the httpx client factory."""
+    mock_client = _mock_head_response("https://cdn/blob")
+    with patch("weaknet_dl.hf_api._client", return_value=mock_client) as factory:
+        resolve_url("owner/repo", "model.bin", user_agent="MyBrowser/1.0")
+    # The factory is called as _client(proxy, token, user_agent)
+    call = factory.call_args
+    assert "MyBrowser/1.0" in call.args or call.kwargs.get("user_agent") == "MyBrowser/1.0"
